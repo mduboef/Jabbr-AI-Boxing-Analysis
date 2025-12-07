@@ -173,10 +173,10 @@ def costCalc(params, data, scores, selectedParams, meanBool, dampener=50.0, shar
     return cost
 
 
-def gradientDescent(data, scores, selectedParams, learningRate=0.00001, iterations=2000, 
+def gradientDescent(data, scores, selectedParams, learningRate=0.00001, iterations=20000, 
                    clipValue=0.5, momentum=0.9996, earlyStopThreshold=0.0, randomSeed=0,
                    includeMappingParams=False, dampener=150.0, sharpness=9.0,
-                   dampenerLearningRate=0.1, sharpnessLearningRate=0.0001):
+                   dampenerLearningRate=0.1, sharpnessLearningRate=0.0005):
 
     # suppress print statements for parallel processing
     suppressPrint = mp.current_process().name != 'MainProcess'
@@ -270,9 +270,9 @@ def gradientDescent(data, scores, selectedParams, learningRate=0.00001, iteratio
         
         # update parameters using momentum
         params -= prevGradients
-        
+
         # clip parameters to reasonable bounds
-        params[:len(selectedParams)] = np.clip(params[:len(selectedParams)], -10, 10)
+        params[:len(selectedParams)] = np.clip(params[:len(selectedParams)], -40, 40)
         if includeMappingParams:
             params[-2] = np.clip(params[-2], 1.0, 1000.0)  # dampener bounds
             params[-1] = np.clip(params[-1], 0.1, 10.0)    # sharpness bounds

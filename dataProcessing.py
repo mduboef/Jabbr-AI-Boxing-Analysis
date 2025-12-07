@@ -1394,3 +1394,66 @@ def normalizeData(pmData, attributes):
     
     return normalizedData, correlations
 
+
+def normalizeRawData(data, parameters):
+    """
+    normalize raw data dictionary for gradient descent while preserving original values
+
+    This function normalizes all stat parameters (both fighter and opponent versions)
+    using StandardScaler to put all features on the same scale. This makes gradient
+    descent more stable and weights directly interpretable.
+
+    Args:
+        data: original data dictionary with raw values
+        parameters: list of parameter names to normalize
+
+    Returns:
+        normalizedData: copy of data dictionary with normalized stat values
+        scaler: fitted StandardScaler object for potential later use
+    """
+    from sklearn.preprocessing import StandardScaler
+
+    # create a copy of the data to avoid modifying original
+    normalizedData = {}
+    for key in data.keys():
+        if isinstance(data[key], list):
+            normalizedData[key] = data[key].copy()
+        else:
+            normalizedData[key] = data[key]
+
+    # collect all stat columns that need normalization
+    # we need to normalize both fighter and opponent versions together
+    statsToNormalize = []
+    for param in parameters:
+        if param not in ['heuristic']:  # skip heuristic as it's not raw data
+            statsToNormalize.append(param)
+            # also add opponent version if it exists and isn't a total/share stat
+            if 'total' not in param and 'Share' not in param:
+                if param + 'O' in data:
+                    statsToNormalize.append(param + 'O')
+
+    # remove duplicates while preserving order
+    statsToNormalize = list(dict.fromkeys(statsToNormalize))
+
+    # create matrix for normalization: rows = samples, columns = features
+    numSamples = len(data['scores'])
+    dataMatrix = np.zeros((numSamples, len(statsToNormalize)))
+
+    for i, stat in enumerate(statsToNormalize):
+        if stat in data:
+            dataMatrix[:, i] = data[stat]
+
+    # fit scaler and transform data
+    scaler = StandardScaler()
+    normalizedMatrix = scaler.fit_transform(dataMatrix)
+
+    # put normalized values back into the dictionary
+    for i, stat in enumerate(statsToNormalize):
+        normalizedData[stat] = normalizedMatrix[:, i].tolist()
+
+    print(f"Normalized {len(statsToNormalize)} stat columns for gradient descent")
+    print(f"  Features are now on same scale (mean=0, std=1)")
+    print(f"  This makes weights directly interpretable and GD more stable")
+
+    return normalizedData, scaler
+

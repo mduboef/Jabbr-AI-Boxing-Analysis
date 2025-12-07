@@ -70,11 +70,14 @@ def gradeRounds(data, mlpPredictions, parameters, optimizedParams, top=10, dampe
         # create a dictionary with both fighter and opponent data for the current round
         roundData = {}
         for param in parameters:
-            if 'total' in param:
-                roundData[param] = [data[param][i]]
+            if 'total' in param or 'Share' in param:
+                # for total/share metrics, create pair with red at i, blue at i+1
+                roundData[param] = [data[param][i], data[param + 'O'][i]]
             else:
-                roundData[param] = [data[param][i]]
-                roundData[param + 'O'] = [data[param + 'O'][i]]
+                # for differential metrics, create pair with red at i, blue at i+1
+                roundData[param] = [data[param][i], data[param + 'O'][i]]
+                # opponent metrics need to be reversed for blue fighter perspective
+                roundData[param + 'O'] = [data[param + 'O'][i], data[param][i]]
         
         # gd : calculate the heuristic value for the current round
         if mlpPredictions == None:
@@ -532,88 +535,214 @@ def rankJudges(data, predictions, disagreeThreshold, judgeName, sampleRank=False
 
     return sortedJudges
 
-# evaluate judges on the same scale as the predictions system
-# compare each score against the score of one of the other judges, chosen at random
-# do the same with the predictions system, pick a random judge to compare it against
-def randomComparison(data, predictions, testData, testPredictions, roundThreshold=20, randomSeed=42):
-    # set random seed right before randomization to ensure consistent results
-    np.random.seed(randomSeed)
 
-    judgeAccuracy = {}  # judge name -> [total rounds, correct rounds]
+# calculate optimal shrinkage parameter k using Method of Moments
+# estimates between-judge variance from the data and uses it to compute principled k
+def calculateOptimalK(judgeAccuracy):
+	# extract human judges only (exclude models and aggregates)
+	judgeNames = [name for name in judgeAccuracy.keys()
+	             if name not in ['prediction', 'prediction (test set only)', 'all judges']]
 
-    judgeAccuracy['prediction'] = [0, 0]
-    judgeAccuracy['all judges'] = [0, 0]
+	# collect observed accuracies and round counts for each judge
+	accuracies = []
+	roundCounts = []
+	for name in judgeNames:
+		totalComparisons, correctComparisons = judgeAccuracy[name]
+		if totalComparisons > 0:
+			accuracy = correctComparisons / totalComparisons
+			numRounds = totalComparisons / 2  # judges get 2 comparisons per round
+			accuracies.append(accuracy)
+			roundCounts.append(numRounds)
 
-    # loop through every round
-    for i in range(0, len(data['round']), 2):
+	if len(accuracies) < 2:
+		print(f"{Fore.YELLOW}Warning: Not enough judges for Method of Moments estimation. Using k=50.{Fore.WHITE}")
+		return 50.0
 
-        # loop through each judge
-        for judgeNum in range(1, 4):
+	# calculate overall mean accuracy
+	overallMean = np.mean(accuracies)
 
-            # add judge to accuracy dict if not already present
-            name = data[f'judge{judgeNum}'][i]
-            if name not in judgeAccuracy:
-                judgeAccuracy[name] = [0, 0]
-            
-            # increment total rounds
-            judgeAccuracy[name][0] += 1
-            judgeAccuracy['all judges'][0] += 1
+	# calculate sample variance of observed accuracies
+	sampleVariance = np.var(accuracies, ddof=1)  # use unbiased estimator
 
-            # pick a random other judge to compare against
-            comparisionJudgeNum = np.random.choice([j for j in range(1, 4) if j != judgeNum])
-            # check if the scores match
-            if np.sign(data[f'score{judgeNum}'][i]) == np.sign(data[f'score{comparisionJudgeNum}'][i]):
-                judgeAccuracy[name][1] += 1
-                judgeAccuracy['all judges'][1] += 1
-            
-        # increment total rounds for the prediction system
-        judgeAccuracy['prediction'][0] += 1
-        # pick a judge to compare the prediction against
-        comparisionJudgeNum = np.random.choice([j for j in range(1, 4)])
-        # check if the scores match
-        if np.sign(predictions[i]) == np.sign(data[f'score{comparisionJudgeNum}'][i]):
-            judgeAccuracy['prediction'][1] += 1
+	# calculate expected within-judge variance (measurement noise)
+	# for binomial data: Var(p_i) ≈ p(1-p)/n_i
+	withinVariances = [overallMean * (1 - overallMean) / n for n in roundCounts]
+	meanWithinVariance = np.mean(withinVariances)
 
+	# estimate between-judge variance using Method of Moments
+	# τ² = sample variance - expected within variance
+	betweenVariance = max(0.0, sampleVariance - meanWithinVariance)
 
-    # if we are using -split then create a second entry for the prediction system, using only the testing set
-    if testData is not None:
-        judgeAccuracy['prediction (test set only)'] = [0, 0]
-        for i in range(0, len(testData['round']), 2):
-            # increment total rounds for the prediction system
-            judgeAccuracy['prediction (test set only)'][0] += 1
-            # pick a judge to compare the prediction against
-            comparisionJudgeNum = np.random.choice([j for j in range(1, 4)])
-            # check if the scores match
-            if np.sign(testPredictions[i]) == np.sign(testData[f'score{comparisionJudgeNum}'][i]):
-                judgeAccuracy['prediction (test set only)'][1] += 1
+	# calculate optimal k = p(1-p) / τ²
+	# if betweenVariance is very small, judges are homogeneous → large k (strong shrinkage)
+	# if betweenVariance is large, judges vary widely → small k (weak shrinkage)
+	if betweenVariance > 0:
+		optimalK = (overallMean * (1 - overallMean)) / betweenVariance
+	else:
+		# if no between-judge variance detected, use strong shrinkage
+		optimalK = 1000.0  # effectively treat all judges as identical
+
+	# print diagnostic information
+	print(f"\n{Fore.GREEN}Method of Moments Estimation:{Fore.WHITE}")
+	print(f"\tOverall mean accuracy:\t\t{100*overallMean:.2f}%")
+	print(f"\tSample variance:\t\t{sampleVariance:.6f}")
+	print(f"\tExpected within-judge variance:\t{meanWithinVariance:.6f}")
+	print(f"\tBetween-judge variance (τ²):\t{betweenVariance:.6f}")
+	print(f"\tOptimal k:\t\t\t{optimalK:.2f} virtual rounds")
+
+	return optimalK
 
 
-    # print out judges ranked by accuracy if they have more than roundThreshold rounds
-    sortedJudges = sorted(judgeAccuracy.items(), key=lambda x: x[1][1]/x[1][0] if x[1][0] > 0 else 0, reverse=True)
-    print("\nJudges Ranked By Random Comparison Accuracy")
-    print("------------------------------------")
-    maxNameLength = max(len(name) for name, _ in sortedJudges)+1
-    rank = 1
-    for name, (totalRounds, correctRounds) in sortedJudges:
-        # only print judges with more than roundThreshold rounds
-        if totalRounds < roundThreshold:
-            continue
-        
-        if rank == 10:  # adjust max name length at rank 10 to adjust for longer rank number
-            maxNameLength -= 1
+# evaluate judges and prediction system using exhaustive pairwise comparisons
+# for each judge: compare against both other judges on each round they scored
+# for the model: compare against all 3 judges on each round
+# this eliminates randomness and uses all available comparison information
+# optionally applies Empirical Bayes shrinkage to stabilize accuracy estimates
+def pairwiseComparison(data, predictions, testData, testPredictions, roundThreshold=20, shrinkageK=None):
 
-        accuracy = correctRounds / totalRounds
-        if name == 'prediction':
-            print(f"{Fore.CYAN}\t{rank}. {name:<{maxNameLength}} : {100*accuracy:.2f}% ({correctRounds}/{totalRounds}){Fore.WHITE}")
-        elif name == 'prediction (test set only)':
-            print(f"{Fore.MAGENTA}\t{rank}. {name:<{maxNameLength}} : {100*accuracy:.2f}% ({correctRounds}/{totalRounds}){Fore.WHITE}")
-        elif name == 'all judges':
-            print(f"{Fore.YELLOW}\t{rank}. {name:<{maxNameLength}} : {100*accuracy:.2f}% ({correctRounds}/{totalRounds}){Fore.WHITE}")
-        else:
-            print(f"\t{rank}. {name:<{maxNameLength}} : {100*accuracy:.2f}% ({correctRounds}/{totalRounds})")
-        rank += 1
-    
-    return
+	judgeAccuracy = {}  # judge name -> [total comparisons, correct comparisons]
+
+	judgeAccuracy['prediction'] = [0, 0]
+	judgeAccuracy['all judges'] = [0, 0]
+
+	# loop through every round
+	for i in range(0, len(data['round']), 2):
+
+		# for each judge, compare against the other 2 judges
+		for judgeNum in range(1, 4):
+
+			# add judge to accuracy dict if not already present
+			name = data[f'judge{judgeNum}'][i]
+			if name not in judgeAccuracy:
+				judgeAccuracy[name] = [0, 0]
+
+			# compare against each of the other 2 judges
+			for otherJudgeNum in range(1, 4):
+				if otherJudgeNum != judgeNum:
+					# increment total comparisons
+					judgeAccuracy[name][0] += 1
+					judgeAccuracy['all judges'][0] += 1
+
+					# check if the scores match
+					if np.sign(data[f'score{judgeNum}'][i]) == np.sign(data[f'score{otherJudgeNum}'][i]):
+						judgeAccuracy[name][1] += 1
+						judgeAccuracy['all judges'][1] += 1
+
+		# for the prediction system, compare against all 3 judges
+		for judgeNum in range(1, 4):
+			# increment total comparisons
+			judgeAccuracy['prediction'][0] += 1
+
+			# check if the prediction matches this judge
+			if np.sign(predictions[i]) == np.sign(data[f'score{judgeNum}'][i]):
+				judgeAccuracy['prediction'][1] += 1
+
+	# if we are using -split then create a second entry for the prediction system, using only the testing set
+	if testData is not None:
+		judgeAccuracy['prediction (test set only)'] = [0, 0]
+		for i in range(0, len(testData['round']), 2):
+			# for the prediction system, compare against all 3 judges
+			for judgeNum in range(1, 4):
+				# increment total comparisons
+				judgeAccuracy['prediction (test set only)'][0] += 1
+
+				# check if the prediction matches this judge
+				if np.sign(testPredictions[i]) == np.sign(testData[f'score{judgeNum}'][i]):
+					judgeAccuracy['prediction (test set only)'][1] += 1
+
+	# apply Empirical Bayes shrinkage if requested
+	shrunkAccuracy = {}  # name -> shrunken accuracy (for sorting and display)
+	if shrinkageK is not None:
+		# if shrinkageK is 'opt', calculate optimal k using Method of Moments
+		if shrinkageK == 'opt':
+			shrinkageK = calculateOptimalK(judgeAccuracy)
+
+		# calculate overall mean accuracy from human judges only (exclude models and aggregate)
+		judgeNames = [name for name in judgeAccuracy.keys()
+		             if name not in ['prediction', 'prediction (test set only)', 'all judges']]
+
+		# calculate mean using raw observed accuracies
+		totalJudgeAccuracy = 0.0
+		for name in judgeNames:
+			totalComparisons, correctComparisons = judgeAccuracy[name]
+			if totalComparisons > 0:
+				totalJudgeAccuracy += correctComparisons / totalComparisons
+		overallMean = totalJudgeAccuracy / len(judgeNames) if len(judgeNames) > 0 else 0.5
+
+		# apply shrinkage to human judges only (not to models)
+		for name, (totalComparisons, correctComparisons) in judgeAccuracy.items():
+			if totalComparisons > 0:
+				# calculate raw accuracy
+				rawAccuracy = correctComparisons / totalComparisons
+
+				# only apply shrinkage to human judges
+				if name not in ['prediction', 'prediction (test set only)', 'all judges']:
+					# convert comparisons to rounds (judges get 2 comparisons per round)
+					numRounds = totalComparisons / 2
+
+					# apply shrinkage formula: (n * observed + k * mean) / (n + k)
+					shrunkAcc = (numRounds * rawAccuracy + shrinkageK * overallMean) / (numRounds + shrinkageK)
+					shrunkAccuracy[name] = shrunkAcc
+				else:
+					# for models and aggregates, use raw accuracy (no shrinkage)
+					shrunkAccuracy[name] = rawAccuracy
+			else:
+				shrunkAccuracy[name] = 0.0
+
+		# sort by shrunken accuracy
+		sortedJudges = sorted(judgeAccuracy.items(), key=lambda x: shrunkAccuracy[x[0]], reverse=True)
+	else:
+		# no shrinkage - sort by raw accuracy
+		sortedJudges = sorted(judgeAccuracy.items(), key=lambda x: x[1][1]/x[1][0] if x[1][0] > 0 else 0, reverse=True)
+
+	# print out judges ranked by accuracy if they have more than roundThreshold rounds
+	# note: judges get 2 comparisons per round, predictions get 3 comparisons per round
+	if shrinkageK is not None:
+		print(f"\nJudges Ranked By Pairwise Comparison Accuracy (with Empirical Bayes Shrinkage, k={shrinkageK})")
+	else:
+		print("\nJudges Ranked By Pairwise Comparison Accuracy")
+	print("------------------------------------")
+	maxNameLength = max(len(name) for name, _ in sortedJudges)+1
+	rank = 1
+	for name, (totalComparisons, correctComparisons) in sortedJudges:
+		# convert comparisons back to rounds for threshold check
+		# judges get 2 comparisons per round, prediction systems get 3
+		if name in ['prediction', 'prediction (test set only)']:
+			numRounds = totalComparisons / 3
+		else:
+			numRounds = totalComparisons / 2
+
+		# only print judges with more than roundThreshold rounds
+		if numRounds < roundThreshold:
+			continue
+
+		if rank == 10:  # adjust max name length at rank 10 to adjust for longer rank number
+			maxNameLength -= 1
+
+		# calculate raw accuracy
+		rawAccuracy = correctComparisons / totalComparisons
+
+		# format output based on whether shrinkage is applied
+		if shrinkageK is not None and name not in ['prediction', 'prediction (test set only)', 'all judges']:
+			# show both raw and shrunken accuracy for human judges only
+			shrunkAcc = shrunkAccuracy[name]
+			accuracyStr = f"{100*rawAccuracy:.2f}% → {100*shrunkAcc:.2f}%"
+		else:
+			# show only raw accuracy for models and when shrinkage is disabled
+			accuracyStr = f"{100*rawAccuracy:.2f}%"
+
+		# print with appropriate color
+		if name == 'prediction':
+			print(f"{Fore.CYAN}\t{rank}. {name:<{maxNameLength}} : {accuracyStr} ({correctComparisons}/{totalComparisons}){Fore.WHITE}")
+		elif name == 'prediction (test set only)':
+			print(f"{Fore.MAGENTA}\t{rank}. {name:<{maxNameLength}} : {accuracyStr} ({correctComparisons}/{totalComparisons}){Fore.WHITE}")
+		elif name == 'all judges':
+			print(f"{Fore.YELLOW}\t{rank}. {name:<{maxNameLength}} : {accuracyStr} ({correctComparisons}/{totalComparisons}){Fore.WHITE}")
+		else:
+			print(f"\t{rank}. {name:<{maxNameLength}} : {accuracyStr} ({correctComparisons}/{totalComparisons})")
+		rank += 1
+
+	return
     
 
 

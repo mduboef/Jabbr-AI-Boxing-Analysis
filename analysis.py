@@ -9,7 +9,7 @@ from dataProcessing import readStats, readCards, pairFightsToCards, getTenTenCou
 from gradientDescent import costCalc, gradientDescent, combos, comboStart
 from mlp import mlp, dictSplit
 from graphing import plotCorrMatrix, plotScatters, plotHistograms, plotNormalHistograms
-from printing import gradeRounds, gradeFights, printAccuracy, printValues, printStanceWinRate, printCorrelations, judgeFrequency, rankJudges, randomComparison, fightLookup, countUniqueJudges
+from printing import gradeRounds, gradeFights, printAccuracy, printValues, printStanceWinRate, printCorrelations, judgeFrequency, rankJudges, pairwiseComparison, fightLookup, countUniqueJudges
 from supplimentals import getAverageStatValues, getStatValuesByScore, printScoreDistribution, sortDataConsistently, fightToDataNoScores, printFightRoundCounts
 from l1Log import runL1Analysis, compareL1ToOtherMethods
 from validation import readQuadStats, excludeSpecificRounds
@@ -18,18 +18,6 @@ from validation import readQuadStats, excludeSpecificRounds
 
 # calculate and return the 10 fights with highest total impact
 def getHighestImpactFights(data):
-    """
-    Calculate total impact for all fights and return the 10 fights with the highest impact.
-    
-    Impact is calculated using: fighterImpact = a*min + b*low + c*mid + d*high + e*max
-    where a=0.092, b=0.091, c=0.147, d=0.266, e=0.513
-    
-    Args:
-        data (dict): main data dictionary containing fight statistics
-    
-    Returns:
-        list: top 10 fights as tuples (fightName, totalImpact, roundCount)
-    """
     
     # impact coefficients
     aCoeff = 0.092  # min coefficient
@@ -89,12 +77,6 @@ def getHighestImpactFights(data):
 
 # print the top 10 highest impact fights with details
 def printHighestImpactFights(data):
-    """
-    Print the 10 fights with the highest total impact in a formatted table.
-    
-    Args:
-        data (dict): main data dictionary containing fight statistics
-    """
     
     topFights = getHighestImpactFights(data)
     
@@ -366,6 +348,9 @@ def main():
     # stores random seed for reproducible data split
     randomSeed = 42  # default seed
 
+    # stores shrinkage parameter for Empirical Bayes shrinkage in rankings
+    shrinkageK = None  # default no shrinkage
+
     # set disagreeThreshold, judgeName & testSplit based on command line args
     for i in range(1, len(sys.argv)):
 
@@ -407,10 +392,29 @@ def main():
                 print(f"{Fore.RED}ERROR:\tSeed must be a valid integer{Fore.WHITE}")
                 return
 
+        elif sys.argv[i] == '-shrink':
+            try:
+                # check if user wants optimal k via Method of Moments
+                if sys.argv[i+1].lower() == 'opt':
+                    shrinkageK = 'opt'
+                else:
+                    # parse as numeric k value
+                    shrinkageK = float(sys.argv[i+1])
+                    if shrinkageK <= 0:
+                        print(f"{Fore.RED}ERROR:\tShrinkage parameter must be positive{Fore.WHITE}")
+                        return
+            except (ValueError, IndexError):
+                print(f"{Fore.RED}ERROR:\tShrinkage parameter must be a valid number or 'opt'{Fore.WHITE}")
+                return
+
 
     # set global random seed for reproducibible data split
     np.random.seed(randomSeed)
     print(f"Using random seed: {randomSeed}")
+
+    # print shrinkage parameter if set
+    if shrinkageK is not None:
+        print(f"Using Empirical Bayes shrinkage with k = {shrinkageK}")
 
 
     # all data
@@ -530,16 +534,16 @@ def main():
     }
 
 
-    # d = 1.0
-    # s = 8.78837
-    bestValues = {
-        "landedShare"     : 7.2041973,
-        "head"            : 0.1312695,
-        "aggressionPower" : 0.4606006,
-        "highImpact"      : 1.2812556,
-        "neutral"         : 0.4287188,
-        "mid"             : 0.4479602,
-    }
+    # # d = 1.0
+    # # s = 8.78837
+    # bestValues = {
+    #     "landedShare"     : 7.2041973,
+    #     "head"            : 0.1312695,
+    #     "aggressionPower" : 0.4606006,
+    #     "highImpact"      : 1.2812556,
+    #     "neutral"         : 0.4287188,
+    #     "mid"             : 0.4479602,
+    # }
 
 
     # # best values with weights rescaled in accordance with quadcam data
@@ -658,12 +662,30 @@ def main():
                 'southpaw', 'squared', 'orthodox',
                 'lead', 'rear', 'head', 'body',
                 'straights', 'hooks', 'overhands', 'uppercuts']
+    
+    # params to be used in combo
+    parameters = ['landed', 'thrown', 'accuracy', 'highImpact',
+                'min', 'low', 'mid', 'high', 'max',
+                'lowCommitMiss', 'highCommitMiss',
+                'pressure', 'pressureDistance', 'pressureMovement', 'pressurePosition',
+                'aggression', 'aggressionCombinations', 'aggressionExchanges', 'aggressionPower',
+                'singles', 'doubles', 'triples', 'quadsPlus',
+                'outside', 'midrange', 'inside', 'clinch',
+                'backfoot', 'neutral', 'frontfoot',
+                'southpaw', 'squared', 'orthodox',
+                'lead', 'rear', 'head', 'body',
+                'straights', 'hooks', 'overhands', 'uppercuts']
         
 
+    # # fewer params give solid cost
+    # parameters = ['min', 'low', 'mid', 'high', 'max', 'thrownShare',
+    #               'pressureDistance', 'pressureMovement', 'pressurePosition',
+    #               'aggressionCombinations', 'aggressionExchanges', 'aggressionPower']
+    
     # fewer params give solid cost
-    parameters = ['min', 'low', 'mid', 'high', 'max', 'thrownShare',
-                  'pressureDistance', 'pressureMovement', 'pressurePosition',
-                  'aggressionCombinations', 'aggressionExchanges', 'aggressionPower']
+    # parameters = ['min', 'low', 'mid', 'high', 'max']
+    # parameters = ['landed']
+
     
     # -best flag
     parameters = ['min', 'low', 'mid', 'high', 'max', 'accuracy',
@@ -691,7 +713,8 @@ def main():
     #             'aggressionPower', 'neutral']
     
 
-    # parameters = ['min', 'low', 'mid', 'high', 'max', 'pressure', 'aggression']
+    # # minimal 6
+    # parameters = ['min', 'low', 'mid', 'high', 'max', 'landed']
 
     # # l1 30
     # parameters = ['accuracy', 'landedShare', 'thrownShare',
@@ -767,7 +790,7 @@ def main():
 
         # comparison of mlp predictions to judges
         # ! We need to get testPredictions after mlp is completed
-        randomComparison(mlpData, mlpPredictions, testing, testPredictions, randomSeed=randomSeed)
+        pairwiseComparison(mlpData, mlpPredictions, testing, testPredictions, shrinkageK=shrinkageK)
         
         # grade rounds
         gradeRounds(mlpData, mlpPredictions, parameters, None)
@@ -811,7 +834,7 @@ def main():
                 return
 
 
-    # if there is a split use training data if not use all data for GD
+    # use raw data directly for gradient descent
     if testSplit != 0.0:
         gradientData = training
     else:
@@ -825,10 +848,12 @@ def main():
         # TODO check that params uses same params as best
 
     elif combosFlag:
+        # combos uses normalized data for gradient descent
         combos(gradientData, parameters, paramCount, dampener=dampener, sharpness=sharpness)
         return
-    
+
     elif combostartFlag:
+        # comboStart uses normalized data for gradient descent
         comboStart(gradientData, startingParams, allParams, paramCount, dampener=dampener, sharpness=sharpness)
         return
     
@@ -867,6 +892,7 @@ def main():
     # print out testing results
     testPM = None
     if testSplit != 0.0:
+        # use raw testing data
         testPM = getPMs(testing, parameters, optimizedParams, allParams, dampener, sharpness)
         print(f"\n\n\t\tTesting Results{judgeString}")
         print("------------------------------------------------------------")
@@ -874,7 +900,7 @@ def main():
         print(f"\tAverage Cost:\t\t\t\t\t{round(costCalc(optimizedParams, testing, testing['scores'], parameters, True, dampener, sharpness),5)}")
         print(f"\tMedian Cost:\t\t\t\t\t{round(costCalc(optimizedParams, testing, testing['scores'], parameters, False, dampener, sharpness),5)}\n")
 
-        # set pmData to include all data not just testing
+        # use raw data for predictions
         pmData = getPMs(data, parameters, optimizedParams, allParams, dampener, sharpness)
     # if no testing data, set pmData to trainPM since it holds all data
     else:
@@ -908,11 +934,12 @@ def main():
 
     # stop here if using quad-cam data
     if useQuadcam or useSinglecam:
+        # use raw data for grading
         gradeRounds(data, None, parameters, optimizedParams, dampener=dampener, sharpness=sharpness)
         gradeFights(data, parameters, optimizedParams, None, dampener=dampener, sharpness=sharpness)
-        randomComparison(data, pmData['heuristic'], None, None, randomSeed=randomSeed)
+        pairwiseComparison(data, pmData['heuristic'], None, None, shrinkageK=shrinkageK)
         # for i in range (1,1001):
-        #     randomComparison(data, pmData['heuristic'], None, None, randomSeed=i)
+        #     pairwiseComparison(data, pmData['heuristic'], None, None)
         print(f"\nDone\t\t{len(fights)} fights,\t\t{int(len(data['scores'])/2)} rounds")
         return
 
@@ -941,13 +968,14 @@ def main():
     rankJudges(data, pmData['heuristic'], disagreeThreshold, judgeName, sampleRank)
     # print accuracy of predictive system relative to judges
     if testSplit != 0.0:
-        randomComparison(data, pmData['heuristic'], testing, testPM['heuristic'], roundThreshold=100, randomSeed=randomSeed)
-        randomComparison(data, pmData['heuristic'], testing, testPM['heuristic'], roundThreshold=50, randomSeed=randomSeed)
-        randomComparison(data, pmData['heuristic'], testing, testPM['heuristic'], roundThreshold=20, randomSeed=randomSeed)
+        pairwiseComparison(data, pmData['heuristic'], testing, testPM['heuristic'], roundThreshold=100, shrinkageK=shrinkageK)
+        pairwiseComparison(data, pmData['heuristic'], testing, testPM['heuristic'], roundThreshold=50, shrinkageK=shrinkageK)
+        pairwiseComparison(data, pmData['heuristic'], testing, testPM['heuristic'], roundThreshold=20, shrinkageK=shrinkageK)
     else:
-        randomComparison(data, pmData['heuristic'], None, None, randomSeed=randomSeed)
+        pairwiseComparison(data, pmData['heuristic'], None, None, shrinkageK=shrinkageK)
 
     # print rounds with biggest difference between actual and predicted score
+    # use raw data
     gradeRounds(data, None, parameters, optimizedParams, dampener=dampener, sharpness=sharpness)
 
     # print fights with biggest average difference between actual and predicted score
@@ -1028,6 +1056,7 @@ def main():
 
     # prompt user to search for a particular fight
     if '-lookup' in sys.argv:
+        # use raw data
         fightLookup(data, None, parameters, optimizedParams, dampener, sharpness)
 
 
